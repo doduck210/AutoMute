@@ -9,18 +9,16 @@ class Program
     private static System.Timers.Timer _unmuteTimer;
     private static readonly object _lock = new object();
     private static bool _isWaitingToUnmute = false;
+    private static float _threshold = 0.5f; // 초기 임계값
 
     static void Main()
     {
-        float threshold = 0.95f; // 0.0~1.0 (실험적으로 조정)
         var enumerator = new MMDeviceEnumerator();
-
         var mic = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
         var speaker = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         var speakerVolume = speaker.AudioEndpointVolume;
 
-        // ms단위 딜레이 타이머 설정
-        _unmuteTimer = new System.Timers.Timer(1500); 
+        _unmuteTimer = new System.Timers.Timer(1500);
         _unmuteTimer.Elapsed += (s, e) =>
         {
             lock (_lock)
@@ -35,24 +33,49 @@ class Program
         _unmuteTimer.AutoReset = false;
 
         Console.WriteLine("시스템 출력 음소거 활성화");
+        Console.WriteLine($"현재 임계값: {_threshold}");
+        Console.WriteLine("새 임계값을 입력하세요 (예: 0.3):");
+
+        // 임계값을 실시간으로 업데이트하는 스레드 시작
+        new Thread(() =>
+        {
+            while (true)
+            {
+                var input = Console.ReadLine();
+                if (float.TryParse(input, out float newThreshold))
+                {
+                    lock (_lock)
+                    {
+                        _threshold = newThreshold;
+                        Console.WriteLine($"[업데이트] 임계값이 {_threshold}로 변경되었습니다.");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("잘못된 입력입니다. 0.0 ~ 1.0 사이의 숫자를 입력하세요.");
+                }
+            }
+        })
+        { IsBackground = true }.Start();
 
         using (var capture = new WasapiCapture(mic))
         {
             capture.DataAvailable += (s, a) =>
             {
-                float max = 0;
+                float sum = 0;
+                int samples = a.BytesRecorded / 2;
                 for (int i = 0; i < a.BytesRecorded; i += 2)
                 {
                     short sample = BitConverter.ToInt16(a.Buffer, i);
                     float sample32 = sample / 32768f;
-                    max = Math.Max(max, Math.Abs(sample32));
+                    sum += sample32 * sample32;
                 }
+                float rms = (float)Math.Sqrt(sum / samples);
 
                 lock (_lock)
                 {
-                    if (max > threshold)
+                    if (rms > _threshold)
                     {
-                        // 입력이 임계값 이상: 즉시 음소거 & 타이머 중지
                         _unmuteTimer.Stop();
                         _isWaitingToUnmute = false;
 
@@ -64,13 +87,12 @@ class Program
                     }
                     else
                     {
-                        // 입력이 임계값 미만: 딜레이 후 해제
                         if (!_isWaitingToUnmute && speakerVolume.Mute)
                         {
                             _isWaitingToUnmute = true;
                             _unmuteTimer.Start();
                             Console.WriteLine("딜레이 시작...");
-                        } 
+                        }
                     }
                 }
             };
